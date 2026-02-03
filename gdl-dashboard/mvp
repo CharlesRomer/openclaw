@@ -1,0 +1,95 @@
+git fetch origin
+git checkout -B gdl-dashboard/mvp
+
+# create folders
+mkdir -p apps/gdl-dashboard/pages/api apps/gdl-dashboard/pages
+
+# package.json
+cat > apps/gdl-dashboard/package.json <<'JSON'
+{
+  "name": "gdl-dashboard",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start"
+  },
+  "dependencies": {
+    "next": "14.0.0",
+    "react": "18.2.0",
+    "react-dom": "18.2.0",
+    "node-fetch": "3.4.0",
+    "swr": "2.2.0"
+  }
+}
+JSON
+
+# next.config.js
+cat > apps/gdl-dashboard/next.config.js <<'JS'
+module.exports = { reactStrictMode: true }
+JS
+
+# frontend page
+cat > apps/gdl-dashboard/pages/index.js <<'JS'
+import useSWR from 'swr'
+const fetcher = (url) => fetch(url).then(r => r.json())
+export default function Home() {
+  const { data } = useSWR('/api/stats', fetcher, { refreshInterval: 30000 })
+  return (
+    <div style={{ fontFamily: 'Inter, Arial, sans-serif', padding: 24 }}>
+      <h1>GDL Dashboard (MVP)</h1>
+      {!data ? <p>Loading...</p> : (
+        <table style={{ borderCollapse: 'collapse', width: 700 }}>
+          <thead><tr><th style={{textAlign:'left'}}>Owner</th><th>Total</th><th>Completed</th><th>Rate</th></tr></thead>
+          <tbody>{data.stats.map(s => (
+            <tr key={s.owner}><td><b>{s.owner}</b></td><td>{s.total}</td><td>{s.completed}</td><td>{s.completion_rate_pct}%</td></tr>
+          ))}</tbody>
+        </table>
+      )}
+    </div>
+  )
+}
+JS
+
+# serverless API that reads Notion
+cat > apps/gdl-dashboard/pages/api/stats.js <<'JS'
+import fetch from 'node-fetch'
+export default async function handler(req, res) {
+  const NOTION_KEY = process.env.NOTION_API_KEY
+  if (!NOTION_KEY) return res.status(500).json({ error: 'Missing NOTION_API_KEY' })
+  const ds = '7f07369c-7f54-4629-a0a6-731197ce2074'
+  const project_relation_id = '2f4aa213-758c-808d-98fc-fa2ee01b4cdb'
+  const url = `https://api.notion.com/v1/data_sources/${ds}/query`
+  let all = []
+  let start_cursor = null
+  while (true) {
+    const body = { filter: { property: 'Project', relation: { contains: project_relation_id } }, page_size: 100 }
+    if (start_cursor) body.start_cursor = start_cursor
+    const r = await fetch(url, { method: 'POST', headers: { 'Authorization': 'Bearer ' + NOTION_KEY, 'Notion-Version': '2025-09-03', 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
+    const j = await r.json()
+    if (!j.results) break
+    all.push(...j.results)
+    if (!j.has_more) break
+    start_cursor = j.next_cursor
+  }
+  const stats = {}
+  all.forEach(r => {
+    const props = r.properties || {}
+    const owners = (props.Owner && props.Owner.people && props.Owner.people.length) ? props.Owner.people.map(p => p.name || (p.person && p.person.email)) : ['(unassigned)']
+    const status = props.Status && props.Status.status && props.Status.status.name
+    owners.forEach(o => {
+      stats[o] = stats[o] || { owner: o, total: 0, completed: 0, completed_on_time: 0, completion_rate_pct: 0 }
+      stats[o].total++
+      if (status && status.toLowerCase() === 'done') stats[o].completed++
+    })
+  })
+  const out = Object.values(stats).map(s => { s.completion_rate_pct = s.total ? Math.round(s.completed / s.total * 1000) / 10 : 0; return s })
+  res.json({ items_count: all.length, stats: out })
+}
+JS
+
+# Git add / commit / push
+git add apps/gdl-dashboard
+git commit -m "feat(gdl-dashboard): add MVP dashboard (stats API + UI)"
+git push -u origin gdl-dashboard/mvp
